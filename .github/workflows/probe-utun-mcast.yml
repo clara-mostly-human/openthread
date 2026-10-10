@@ -1,0 +1,62 @@
+#
+# Research probe: why does IPV6_JOIN_GROUP(ff02::1) fail with EINVAL on a brand-new
+# macOS utun interface? (OpenThread src/posix/platform/netif.cpp UpdateMulticast "FIX ME")
+#
+# Runs only on pushes to the probe branch of this fork. Not meant for upstream.
+#
+
+name: probe-utun-mcast
+
+on:
+  push:
+    branches:
+      - probe/utun-mcast-join
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host info
+        run: |
+          sw_vers
+          uname -a
+          sysctl kern.version
+          echo "---- net.inet6.ip6 sysctls"
+          sysctl net.inet6.ip6 2>/dev/null | grep -E 'auto_linklocal|in6_embedded_scope|accept_rtadv|forwarding|dad_count|use_defaultzone|v6only|only_allow_rfc4193_prefixes' || true
+          echo "---- interfaces before"
+          ifconfig -a
+
+      - name: Build probe
+        run: clang -Wall -Wextra -O1 -o probe/utun_mcast_probe probe/utun_mcast_probe.c
+
+      - name: Run probe (as root)
+        run: |
+          set -o pipefail
+          sudo ./probe/utun_mcast_probe 2>&1 | tee probe-${{ matrix.os }}.log
+
+      - name: Kernel and configd log lines mentioning utun
+        if: always()
+        run: |
+          sudo log show --last 10m --style compact --info --predicate 'eventMessage CONTAINS "utun"' 2>/dev/null | grep -v '^Filtering' | head -400 || true
+
+      - name: Interfaces after
+        if: always()
+        run: ifconfig -a
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-log-${{ matrix.os }}
+          path: probe-*.log
