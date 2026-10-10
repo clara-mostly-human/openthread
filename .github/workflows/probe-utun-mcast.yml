@@ -60,5 +60,3 @@ jobs:
         with:
           name: probe-log-${{ matrix.os }}
           path: probe-*.log
-#
-# (research branch; third push to check that the push trigger fires)
