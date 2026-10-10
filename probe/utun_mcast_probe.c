@@ -59,7 +59,7 @@
 #define TICK_MS 20
 
 static const char *const kGroups[] = {"ff01::1", "ff02::1", "ff02::2", "ff03::1", "ff05::1"};
-#define NGROUPS (sizeof(kGroups) / sizeof(kGroups[0]))
+#define kNumGroups (sizeof(kGroups) / sizeof(kGroups[0]))
 
 struct utun
 {
@@ -263,7 +263,7 @@ struct state
     int   n_in6;
     bool  ll;
     int   nd6;
-    int   join[NGROUPS];
+    int   join[kNumGroups];
 };
 
 static void sample(const struct utun *u, struct state *s)
@@ -273,7 +273,7 @@ static void sample(const struct utun *u, struct state *s)
     s->flags_err = get_flags(u->name, &s->flags);
     s->n_in6     = count_in6(u->name, &s->ll);
     s->nd6       = nd6_info(u->name);
-    for (i = 0; i < NGROUPS; i++)
+    for (i = 0; i < kNumGroups; i++)
         s->join[i] = try_join(u->idx, kGroups[i]);
 }
 
@@ -287,7 +287,7 @@ static void format_state(const struct state *s, char *out, size_t n)
         flags_str(s->flags, fl, sizeof(fl));
     off = (size_t)snprintf(out, n, "flags=%s in6addrs=%d linklocal=%s nd6info=%s", fl, s->n_in6, s->ll ? "yes" : "no",
                            errname(s->nd6));
-    for (i = 0; i < NGROUPS && off < n; i++)
+    for (i = 0; i < kNumGroups && off < n; i++)
         off += (size_t)snprintf(out + off, n - off, " %s=%s", kGroups[i], errname(s->join[i]));
 }
 
