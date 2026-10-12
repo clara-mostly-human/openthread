@@ -23,6 +23,11 @@
  *   E  fresh utun + SIOCPROTOATTACH_IN6 (attach IPv6 only)
  *   F  fresh utun + SIOCAIFADDR_IN6 (add a ULA, what netif.cpp UpdateUnicast does)
  *   G  fresh utun, taken DOWN immediately, passive, then UP again
+ *   H1 OpenThread's shutdown order: fresh utun, SIOCAIFADDR_IN6 ULA, join ff02::1 /
+ *      ff03::1 / ff02::2 on one socket, remove ALL inet6 addresses (ULA and the
+ *      kernel's auto link-local, both via SIOCDIFADDR_IN6), then IPV6_LEAVE_GROUP x3
+ *   H2 same, but leave ff02::1 BEFORE the addresses are removed (baseline)
+ *   I  close H2 (an ifnet that had IPv6 attached), recreate: recycled ifnet, join at once?
  *
  * The program only ever touches the utun interfaces it created itself.
  * It must run as root. It never aborts on a probe error; it logs errno and goes on.
@@ -438,9 +443,172 @@ static void list_utuns(const char *label)
     logf("%s: existing utun interfaces:%s", label, buf[0] ? buf : " (none)");
 }
 
+/* ---- Phase H helpers: one persistent socket, address deletion, kernel-side group view ---- */
+
+static const char *const kHGroups[] = {"ff02::1", "ff03::1", "ff02::2"};
+#define kNumHGroups (sizeof(kHGroups) / sizeof(kHGroups[0]))
+
+static const char *errdesc(int e)
+{
+    static char buf[64];
+    snprintf(buf, sizeof(buf), "errno=%d (%s)", e, e == 0 ? "OK" : errname(e));
+    return buf;
+}
+
+static void mcast_op(int fd, const struct utun *u, const char *label, bool join, const char *group)
+{
+    struct ipv6_mreq mreq;
+    int              e = 0;
+
+    memset(&mreq, 0, sizeof(mreq));
+    inet_pton(AF_INET6, group, &mreq.ipv6mr_multiaddr);
+    mreq.ipv6mr_interface = u->idx;
+    if (setsockopt(fd, IPPROTO_IPV6, join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP, &mreq, sizeof(mreq)) != 0)
+        e = errno;
+    logf("%s %s: %s %s -> %s", label, u->name, join ? "IPV6_JOIN_GROUP" : "IPV6_LEAVE_GROUP", group, errdesc(e));
+}
+
+static int list_in6(const struct utun *u, const char *label)
+{
+    struct ifaddrs *ifa0 = NULL, *ifa;
+    char            buf[INET6_ADDRSTRLEN];
+    int             n = 0;
+
+    if (getifaddrs(&ifa0) != 0)
+    {
+        logf("%s %s: getifaddrs failed: %s", label, u->name, strerror(errno));
+        return -1;
+    }
+    for (ifa = ifa0; ifa != NULL; ifa = ifa->ifa_next)
+    {
+        struct sockaddr_in6 *sin6;
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6 || strcmp(ifa->ifa_name, u->name) != 0)
+            continue;
+        sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
+        inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf));
+        n++;
+        logf("%s %s: inet6 address #%d: %s (sin6_scope_id %u)", label, u->name, n, buf, sin6->sin6_scope_id);
+    }
+    freeifaddrs(ifa0);
+    logf("%s %s: %d inet6 address(es) present", label, u->name, n);
+    return n;
+}
+
+static bool find_linklocal(const char *name, struct in6_addr *out)
+{
+    struct ifaddrs *ifa0 = NULL, *ifa;
+    bool            found = false;
+
+    if (getifaddrs(&ifa0) != 0)
+        return false;
+    for (ifa = ifa0; ifa != NULL && !found; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6 || strcmp(ifa->ifa_name, name) != 0)
+            continue;
+        if (IN6_IS_ADDR_LINKLOCAL(&((struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr))
+        {
+            *out = ((struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr;
+            out->__u6_addr.__u6_addr16[1] = 0; /* no embedded zone; the kernel re-embeds ifp->if_index */
+            found = true;
+        }
+    }
+    freeifaddrs(ifa0);
+    return found;
+}
+
+/* netif.cpp removes the stack-added link-local with SIOCDIFADDR_IN6; do the same (struct in6_ifreq) */
+static void del_unicast(const struct utun *u, const char *label, const struct in6_addr *addr, const char *what)
+{
+    struct in6_ifreq ifr;
+    char             buf[INET6_ADDRSTRLEN];
+
+    memset(&ifr, 0, sizeof(ifr));
+    strlcpy(ifr.ifr_name, u->name, sizeof(ifr.ifr_name));
+    ifr.ifr_ifru.ifru_addr.sin6_family = AF_INET6;
+    ifr.ifr_ifru.ifru_addr.sin6_len    = sizeof(struct sockaddr_in6);
+    ifr.ifr_ifru.ifru_addr.sin6_addr   = *addr;
+    inet_ntop(AF_INET6, addr, buf, sizeof(buf));
+    if (ioctl(g_ip6fd, SIOCDIFADDR_IN6, &ifr) != 0)
+        logf("%s %s: SIOCDIFADDR_IN6 %s (%s) -> %s", label, u->name, buf, what, errdesc(errno));
+    else
+        logf("%s %s: SIOCDIFADDR_IN6 %s (%s) -> OK", label, u->name, buf, what);
+}
+
+/* kernel-side view: every multicast group the kernel holds on this utun (netstat -g, last column = netif) */
+static void show_netstat_g(const struct utun *u, const char *label, const char *when)
+{
+    char cmd[320];
+    logf("%s %s: netstat -g, groups held by the kernel on %s (%s):", label, u->name, u->name, when);
+    fflush(stdout);
+    snprintf(cmd, sizeof(cmd),
+             "netstat -g -n 2>&1 | awk -v n=%s '/Memberships/{sec=$0} $NF==n {c++; printf \"    %%-36s [%%s]\\n\", $1, sec} "
+             "END{if(!c) print \"    (none on \" n \")\"}'",
+             u->name);
+    (void)system(cmd);
+    fflush(stdout);
+}
+
+static void phase_h(struct utun *u, const char *label, const char *ula, bool leave_ff02_1_first)
+{
+    int            jfd;
+    struct in6_addr a, ll;
+    size_t         i;
+
+    logf("==== Phase %s: OpenThread shutdown order on macOS: %s", label,
+         leave_ff02_1_first ? "leave ff02::1 BEFORE removing the addresses (baseline), then remove, then leave the rest"
+                            : "remove ALL inet6 addresses first, THEN IPV6_LEAVE_GROUP");
+    if (utun_create(u, label) != 0)
+        return;
+    probe_once(u, label); /* fresh ifnet: ff02::1 EINVAL expected */
+
+    add_unicast(u, label, ula, 64); /* attaches IPv6; kernel adds its auto link-local */
+    list_in6(u, label);
+
+    jfd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (jfd < 0)
+    {
+        logf("%s %s: socket(AF_INET6) failed: %s", label, u->name, strerror(errno));
+        return;
+    }
+    for (i = 0; i < kNumHGroups; i++)
+        mcast_op(jfd, u, label, true, kHGroups[i]);
+    show_ifconfig(u, label);
+    show_netstat_g(u, label, "after joins, addresses present");
+
+    if (leave_ff02_1_first)
+    {
+        mcast_op(jfd, u, label, false, "ff02::1");
+        show_netstat_g(u, label, "after leaving ff02::1, addresses still present");
+    }
+
+    inet_pton(AF_INET6, ula, &a);
+    del_unicast(u, label, &a, "the ULA");
+    if (find_linklocal(u->name, &ll))
+        del_unicast(u, label, &ll, "kernel auto link-local, like netif.cpp does");
+    else
+        logf("%s %s: no link-local address found to remove", label, u->name);
+    list_in6(u, label); /* expect 0 */
+    logf("%s %s: after removing all addresses: SIOCGIFINFO_IN6 -> %s (IPv6 still attached to the ifnet?)", label,
+         u->name, errname(nd6_info(u->name)));
+    show_ifconfig(u, label);
+    show_netstat_g(u, label, "after ALL inet6 addresses were removed, before the leaves");
+
+    for (i = 0; i < kNumHGroups; i++)
+    {
+        if (leave_ff02_1_first && strcmp(kHGroups[i], "ff02::1") == 0)
+            continue;
+        mcast_op(jfd, u, label, false, kHGroups[i]);
+    }
+    show_netstat_g(u, label, "after the leaves");
+    logf("%s %s: control: leaving ff03::1 a second time (not a member any more):", label, u->name);
+    mcast_op(jfd, u, label, false, "ff03::1");
+    close(jfd);
+    show_netstat_g(u, label, "after close() of the joining socket");
+}
+
 int main(void)
 {
-    struct utun a, b, c, d, p, e, f, g;
+    struct utun a, b, c, d, p, e, f, g, h1, h2, i;
 
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -546,12 +714,33 @@ int main(void)
         show_ifconfig(&g, "G");
     }
 
+    /* ---------------- Phase H: shutdown order, two variants ---------------- */
+    phase_h(&h1, "H1", "fd7e:5700:7e57:1::1", false);
+    phase_h(&h2, "H2", "fd7e:5700:7e57:2::1", true);
+
+    /* ---------------- Phase I: recycle an ifnet that HAD IPv6 attached ---------------- */
+    logf("==== Phase I: close %s (its ifnet had IPv6 attached), wait 500 ms, create again: recycled ifnet -> does "
+         "the link-local join pass at once?",
+         h2.name);
+    utun_close(&h2, "I");
+    sleep_ms(500);
+    if (utun_create(&i, "I") == 0)
+    {
+        logf("I: new %s ifindex=%u vs closed H2 %s ifindex=%u -> %s", i.name, i.idx, h2.name, h2.idx,
+             (i.idx == h2.idx && strcmp(i.name, h2.name) == 0) ? "SAME name and index (recycled)" : "different");
+        probe_once(&i, "I");
+        probe_loop(&i, "I", 1000);
+        show_netstat_g(&i, "I", "recycled ifnet, no addresses, nothing joined");
+    }
+
     logf("==== cleanup");
     utun_close(&d, "cleanup");
     utun_close(&p, "cleanup");
     utun_close(&e, "cleanup");
     utun_close(&f, "cleanup");
     utun_close(&g, "cleanup");
+    utun_close(&h1, "cleanup");
+    utun_close(&i, "cleanup");
     sleep_ms(500);
     list_utuns("end");
     close(g_ip6fd);
