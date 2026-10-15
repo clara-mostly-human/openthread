@@ -295,6 +295,21 @@ check_daemon_backtrace()
     grep -qE '#\s*[0-9]+: ' "${OT_DAEMON_OUTPUT}" || die 'the stack trace has no frame'
 }
 
+check_daemon_socket_path()
+{
+    local socket
+
+    [[ ${OT_DAEMON} == 'on' ]] || return 0
+
+    # The default socket directory of the build: the runtime directory, not /tmp.
+    if [[ ${OSTYPE} == linux-gnu* ]]; then
+        socket="/run/openthread-${NETIF_NAME}.sock"
+    else
+        socket="/var/run/openthread-${NETIF_NAME}.sock"
+    fi
+    sudo test -S "${socket}" || die "ot-daemon does not listen on ${socket}"
+}
+
 do_check()
 {
     trap at_exit INT TERM EXIT
@@ -352,6 +367,8 @@ do_check()
         "${OT_CTL[@]}" -I "${NETIF_NAME}" factoryreset
         # sleep a while for daemon ready
         sleep 2
+
+        check_daemon_socket_path
 
         OPENTHREAD_CONFIG_CLI_MAX_LINE_LENGTH=640
         readonly OPENTHREAD_CONFIG_CLI_MAX_LINE_LENGTH
