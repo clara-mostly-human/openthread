@@ -281,6 +281,20 @@ host_address_gone()
     ! grep -Fx "$1" <<<"${addresses//$'\r'/}" >/dev/null
 }
 
+check_daemon_backtrace()
+{
+    [[ ${OT_DAEMON} == 'on' ]] || return 0
+
+    # A fatal signal leaves a stack trace in the log on every platform. This ends ot-daemon, so
+    # it is the last check.
+    sudo kill -SEGV "$(pgrep -n -x ot-daemon)"
+    sleep 2
+
+    grep -A20 'BEGINNING OF CRASH' "${OT_DAEMON_OUTPUT}" || die 'no stack trace after SIGSEGV'
+    grep -q 'END OF CRASH' "${OT_DAEMON_OUTPUT}" || die 'the stack trace is incomplete'
+    grep -qE '#\s*[0-9]+: ' "${OT_DAEMON_OUTPUT}" || die 'the stack trace has no frame'
+}
+
 do_check()
 {
     trap at_exit INT TERM EXIT
@@ -442,6 +456,7 @@ EOF
     if [[ $OSTYPE != "linux-gnu"* ]]; then
         check_daemon_omr_route
         check_daemon_netif_down
+        check_daemon_backtrace
         return 0
     fi
 
@@ -473,6 +488,7 @@ EOF
 
     check_daemon_omr_route
     check_daemon_netif_down
+    check_daemon_backtrace
 }
 
 main()
