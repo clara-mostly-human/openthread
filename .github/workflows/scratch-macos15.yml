@@ -55,24 +55,25 @@ jobs:
           H=third_party/mbedtls/openthread-mbedtls-config.h
           wc -l $H; grep -c '^#if' $H || true
           grep -n 'OPENTHREAD_CONFIG\|X509_CRT_PARSE_C\|SSL_TLS_C' $H || true
-          echo "--- header as generated"; cat $H
 
-      - name: regenerate with deduplicated defines
+      - name: build ot-cli-ftd and inspect
         run: |
           set -x; set +e
-          cd build/third_party/mbedtls
-          DEFS=$(tr ' ' '\n' < /tmp/gen.cmd | sed "s/^'//; s/'\$//" | grep '^-D' | sort -u | tr '\n' ' ')
-          INCS=$(tr ' ' '\n' < /tmp/gen.cmd | grep '^-I' | sort -u | tr '\n' ' ')
-          echo "defs: $DEFS"; echo "incs: $INCS"
-          unifdefall $DEFS $INCS "$GITHUB_WORKSPACE/third_party/mbedtls/mbedtls-config.h" > /tmp/dedup.raw; echo "dedup exit=$?"
-          sed '/openthread-core-config\.h/d' /tmp/dedup.raw > /tmp/dedup.h
-          wc -l /tmp/dedup.h; grep -c '^#if' /tmp/dedup.h || true
-          grep -n 'OPENTHREAD_CONFIG\|X509_CRT_PARSE_C\|SSL_TLS_C' /tmp/dedup.h || true
-          diff openthread-mbedtls-config.h /tmp/dedup.h && echo "SAME as the build's header" || echo "DIFFERS from the build's header"
-
-      - name: full default build (expected to fail at the ot-cli link)
-        run: |
-          cd build && (ninja 2>&1 | tail -40); echo "ninja exit=${PIPESTATUS[0]}"
+          cd build
+          ninja examples/apps/cli/ot-cli-ftd 2>&1 | grep -E 'FAILED|Undefined|referenced from|_mbedtls_|ld: ' | head -20; echo "ninja exit=${PIPESTATUS[0]}"
+          X509=third_party/mbedtls/repo/library/CMakeFiles/mbedx509.dir/x509_crt.c.o
+          TCP=$(ninja -t targets all | grep -o '[^ ]*cli_tcp.cpp.o' | grep 'cli-ftd' | head -1); echo "cli_tcp object: $TCP"
+          echo "--- defined x509 symbols in libmbedx509.a"; nm third_party/mbedtls/repo/library/libmbedx509.a 2>/dev/null | grep -E ' T _?mbedtls_x509_crt_(init|parse)$' | sort -u
+          echo "--- undefined x509/ssl refs in cli_tcp.cpp.o"; nm -u "$TCP" 2>/dev/null | grep -E 'x509_crt_init|ssl_set_hostname|ssl_conf_ca_chain' | sort -u
+          echo "--- compile command of x509_crt.c"; ninja -t commands "$X509" | tail -1 | cut -c1-900
+          echo "--- compile command of cli_tcp.cpp"; ninja -t commands "$TCP" | tail -1 | cut -c1-900
+          echo "--- link command of ot-cli-ftd"; ninja -t commands examples/apps/cli/ot-cli-ftd | tail -1 | cut -c1-900
+          echo "--- macros seen when compiling x509_crt.c"
+          CMD=$(ninja -t commands "$X509" | tail -1); eval "$CMD -dM -E" && grep -E 'define (MBEDTLS_X509_CRT_PARSE_C|OPENTHREAD_CONFIG_TLS_ENABLE|OPENTHREAD_CONFIG_TCP_ENABLE|OPENTHREAD_CONFIG_COAP_SECURE_API_ENABLE|OPENTHREAD_CONFIG_BLE_TCAT_ENABLE|MBEDTLS_CONFIG_FILE)' "$X509"
+          echo "--- macros seen when compiling cli_tcp.cpp"
+          CMD=$(ninja -t commands "$TCP" | tail -1); eval "$CMD -dM -E" && grep -E 'define (MBEDTLS_X509_CRT_PARSE_C|OPENTHREAD_CONFIG_TLS_ENABLE|OPENTHREAD_CONFIG_TCP_ENABLE|OPENTHREAD_CONFIG_COAP_SECURE_API_ENABLE|OPENTHREAD_CONFIG_BLE_TCAT_ENABLE|MBEDTLS_CONFIG_FILE)' "$TCP"
+          echo "--- which openthread-mbedtls-config.h files exist"; find . -name 'openthread-mbedtls-config.h' -o -name 'mbedtls-config.h' | head
+          find "$GITHUB_WORKSPACE" -name 'openthread-mbedtls-config.h' -not -path '*/build/*' | head
 
   reference-linux:
     runs-on: ubuntu-24.04
@@ -100,4 +101,22 @@ jobs:
           H=third_party/mbedtls/openthread-mbedtls-config.h
           wc -l $H; grep -c '^#if' $H || true
           grep -n 'OPENTHREAD_CONFIG\|X509_CRT_PARSE_C\|SSL_TLS_C' $H || true
-          echo "--- header as generated"; cat $H
+
+      - name: build ot-cli-ftd and inspect
+        run: |
+          set -x; set +e
+          cd build
+          ninja examples/apps/cli/ot-cli-ftd 2>&1 | grep -E 'FAILED|Undefined|referenced from|_mbedtls_|ld: ' | head -20; echo "ninja exit=${PIPESTATUS[0]}"
+          X509=third_party/mbedtls/repo/library/CMakeFiles/mbedx509.dir/x509_crt.c.o
+          TCP=$(ninja -t targets all | grep -o '[^ ]*cli_tcp.cpp.o' | grep 'cli-ftd' | head -1); echo "cli_tcp object: $TCP"
+          echo "--- defined x509 symbols in libmbedx509.a"; nm third_party/mbedtls/repo/library/libmbedx509.a 2>/dev/null | grep -E ' T _?mbedtls_x509_crt_(init|parse)$' | sort -u
+          echo "--- undefined x509/ssl refs in cli_tcp.cpp.o"; nm -u "$TCP" 2>/dev/null | grep -E 'x509_crt_init|ssl_set_hostname|ssl_conf_ca_chain' | sort -u
+          echo "--- compile command of x509_crt.c"; ninja -t commands "$X509" | tail -1 | cut -c1-900
+          echo "--- compile command of cli_tcp.cpp"; ninja -t commands "$TCP" | tail -1 | cut -c1-900
+          echo "--- link command of ot-cli-ftd"; ninja -t commands examples/apps/cli/ot-cli-ftd | tail -1 | cut -c1-900
+          echo "--- macros seen when compiling x509_crt.c"
+          CMD=$(ninja -t commands "$X509" | tail -1); eval "$CMD -dM -E" && grep -E 'define (MBEDTLS_X509_CRT_PARSE_C|OPENTHREAD_CONFIG_TLS_ENABLE|OPENTHREAD_CONFIG_TCP_ENABLE|OPENTHREAD_CONFIG_COAP_SECURE_API_ENABLE|OPENTHREAD_CONFIG_BLE_TCAT_ENABLE|MBEDTLS_CONFIG_FILE)' "$X509"
+          echo "--- macros seen when compiling cli_tcp.cpp"
+          CMD=$(ninja -t commands "$TCP" | tail -1); eval "$CMD -dM -E" && grep -E 'define (MBEDTLS_X509_CRT_PARSE_C|OPENTHREAD_CONFIG_TLS_ENABLE|OPENTHREAD_CONFIG_TCP_ENABLE|OPENTHREAD_CONFIG_COAP_SECURE_API_ENABLE|OPENTHREAD_CONFIG_BLE_TCAT_ENABLE|MBEDTLS_CONFIG_FILE)' "$TCP"
+          echo "--- which openthread-mbedtls-config.h files exist"; find . -name 'openthread-mbedtls-config.h' -o -name 'mbedtls-config.h' | head
+          find "$GITHUB_WORKSPACE" -name 'openthread-mbedtls-config.h' -not -path '*/build/*' | head
