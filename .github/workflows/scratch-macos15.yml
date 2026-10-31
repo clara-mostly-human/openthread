@@ -1,0 +1,75 @@
+name: scratch-macos15
+
+on:
+  push:
+    branches: ['scratch/macos15-unifdef-debug']
+
+permissions: {}
+
+env:
+  NEST_CFLAGS: >-
+    -DOPENTHREAD_CONFIG_BORDER_ROUTER_ENABLE=1
+    -DOPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE=1
+    -DOPENTHREAD_CONFIG_CHANNEL_MONITOR_ENABLE=1
+    -DOPENTHREAD_CONFIG_DATASET_UPDATER_ENABLE=1
+    -DOPENTHREAD_CONFIG_DIAG_ENABLE=1
+    -DOPENTHREAD_CONFIG_JAM_DETECTION_ENABLE=1
+    -DOPENTHREAD_CONFIG_MAC_FILTER_ENABLE=1
+    -DOPENTHREAD_CONFIG_PING_SENDER_ENABLE=1
+    -DOPENTHREAD_CONFIG_NCP_SPI_ENABLE=1
+    -DOPENTHREAD_CONFIG_PLATFORM_FLASH_API_ENABLE=1
+    -DOPENTHREAD_CONFIG_TMF_NETDATA_SERVICE_ENABLE=1
+
+jobs:
+  probe:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: toolchain
+        run: |
+          set -x
+          sw_vers; xcodebuild -version; uname -m; cmake --version | head -1; ninja --version
+          which unifdef unifdefall cpp
+          unifdef -V 2>&1 || true
+          file /usr/bin/unifdef /usr/bin/unifdefall
+          mkdir -p /tmp/p && cd /tmp/p
+          printf '#define BAR 1\n' > bar.h
+          printf '#include "bar.h"\n#if FOO\nfoo\n#endif\n#if BAR\nbar\n#endif\n#if BAZ\nbaz\n#endif\n' > u.h
+          unifdef -DFOO=1 -DFOO=1 u.h; echo "unifdef dup exit=$?"
+          unifdefall -I. -DFOO=1 u.h; echo "unifdefall single exit=$?"
+          unifdefall -I. -DFOO=1 -DFOO=1 u.h; echo "unifdefall dup exit=$?"
+
+      - name: generate the mbedtls config header (default simulation build)
+        run: |
+          set -x
+          mkdir build && cd build
+          CFLAGS="$NEST_CFLAGS" CXXFLAGS="$NEST_CFLAGS" cmake -GNinja -DOT_PLATFORM=simulation ..
+          ninja -t commands third_party/mbedtls/openthread-mbedtls-config.h | tail -1 | tee /tmp/gen.cmd
+          echo "--- duplicate -D symbols in the generation command"
+          tr ' ' '\n' < /tmp/gen.cmd | sed "s/^'//; s/'\$//" | grep '^-D' | sort | uniq -d || true
+          ninja -v third_party/mbedtls/openthread-mbedtls-config.h; echo "ninja exit=$?"
+          H=third_party/mbedtls/openthread-mbedtls-config.h
+          wc -l $H; grep -c '^#if' $H || true
+          grep -n 'OPENTHREAD_CONFIG\|X509_CRT_PARSE_C\|SSL_TLS_C' $H || true
+          echo "--- header as generated"; cat $H
+
+      - name: regenerate with deduplicated defines
+        run: |
+          set -x
+          cd build/third_party/mbedtls
+          DEFS=$(tr ' ' '\n' < /tmp/gen.cmd | sed "s/^'//; s/'\$//" | grep '^-D' | sort -u | tr '\n' ' ')
+          INCS=$(tr ' ' '\n' < /tmp/gen.cmd | grep '^-I' | sort -u | tr '\n' ' ')
+          echo "defs: $DEFS"; echo "incs: $INCS"
+          unifdefall $DEFS $INCS "$GITHUB_WORKSPACE/third_party/mbedtls/mbedtls-config.h" > /tmp/dedup.raw; echo "dedup exit=$?"
+          sed '/openthread-core-config\.h/d' /tmp/dedup.raw > /tmp/dedup.h
+          wc -l /tmp/dedup.h; grep -c '^#if' /tmp/dedup.h || true
+          grep -n 'OPENTHREAD_CONFIG\|X509_CRT_PARSE_C\|SSL_TLS_C' /tmp/dedup.h || true
+          diff openthread-mbedtls-config.h /tmp/dedup.h && echo "SAME as the build's header" || echo "DIFFERS from the build's header"
+
+      - name: full default build (expected to fail at the ot-cli link)
+        run: |
+          cd build && (ninja 2>&1 | tail -40); echo "ninja exit=${PIPESTATUS[0]}"
