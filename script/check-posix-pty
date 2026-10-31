@@ -353,41 +353,69 @@ check_host_link_state()
     "${OT_CTL[@]}" -I "${NETIF_NAME}" ifconfig | grep 'up' || die 'OpenThread did not follow the host setting the interface up'
 }
 
+mdns_lists_address()
+{
+    local addresses
+
+    addresses=$("${OT_CTL[@]}" -I "${NETIF_NAME}" mdns localhostaddrs) || return 1
+    grep -q "$1" <<<"${addresses}"
+}
+
+mdns_lacks_address()
+{
+    local addresses
+
+    addresses=$("${OT_CTL[@]}" -I "${NETIF_NAME}" mdns localhostaddrs) || return 1
+    ! grep -q "$1" <<<"${addresses}"
+}
+
 check_daemon_mdns_address_monitor()
 {
     local address='fd00:5678::1'
     # ot-ctl prints every address as eight groups, without "::".
     local listed='fd00:5678:0:0:0:0:0:1'
+    local iface
     local index
-    local addresses
+    local state
+    local enabled_here=0
 
     [[ ${OT_DAEMON} == 'on' ]] || return 0
 
     # OpenThread's mDNS learns the addresses of the interface it serves from the routing socket
-    # (netlink on Linux) and lists them as its local host addresses.
-    index=$(python3 -c "import socket; print(socket.if_nametoindex('${NETIF_NAME}'))")
-    "${OT_CTL[@]}" -I "${NETIF_NAME}" mdns enable "${index}" | grep 'Done' || die 'failed to enable mDNS'
+    # (netlink on Linux) and lists them as its local host addresses. With an infrastructure interface
+    # (-B) mDNS is enabled there by itself (OPENTHREAD_CONFIG_MULTICAST_DNS_AUTO_ENABLE_ON_INFRA_IF), and
+    # enabling it again on another interface changes nothing; without one it is enabled on the Thread
+    # interface for this check.
+    if [[ -n ${INFRA_IF_NAME:-} ]]; then
+        iface=${INFRA_IF_NAME}
+        index=${INFRA_IF_INDEX}
+    else
+        iface=${NETIF_NAME}
+        index=$(python3 -c "import socket; print(socket.if_nametoindex('${NETIF_NAME}'))")
+    fi
+    state=$("${OT_CTL[@]}" -I "${NETIF_NAME}" mdns state) || die 'failed to read the mDNS state'
+    if ! grep -q Enabled <<<"${state}"; then
+        "${OT_CTL[@]}" -I "${NETIF_NAME}" mdns enable "${index}" | grep 'Done' || die 'failed to enable mDNS'
+        enabled_here=1
+    fi
 
     if [[ ${OSTYPE} == darwin* ]]; then
-        sudo ifconfig "${NETIF_NAME}" inet6 "${address}" prefixlen 64 alias
+        sudo ifconfig "${iface}" inet6 "${address}" prefixlen 64 alias
     else
-        sudo ip -6 addr add "${address}/64" dev "${NETIF_NAME}"
+        sudo ip -6 addr add "${address}/64" dev "${iface}"
     fi
-    sleep 1
-    "${OT_CTL[@]}" -I "${NETIF_NAME}" mdns localhostaddrs | grep "${listed}" || die 'an address added on the host did not reach mDNS'
+    timeout_run 10 mdns_lists_address "${listed}" || die 'an address added on the host did not reach mDNS'
 
     if [[ ${OSTYPE} == darwin* ]]; then
-        sudo ifconfig "${NETIF_NAME}" inet6 "${address}" prefixlen 64 -alias
+        sudo ifconfig "${iface}" inet6 "${address}" prefixlen 64 -alias
     else
-        sudo ip -6 addr del "${address}/64" dev "${NETIF_NAME}"
+        sudo ip -6 addr del "${address}/64" dev "${iface}"
     fi
-    sleep 1
-    addresses=$("${OT_CTL[@]}" -I "${NETIF_NAME}" mdns localhostaddrs) || die 'failed to list the mDNS local host addresses'
-    if grep "${listed}" <<<"${addresses}"; then
-        die 'an address removed on the host is still an mDNS local host address'
-    fi
+    timeout_run 10 mdns_lacks_address "${listed}" || die 'an address removed on the host is still an mDNS local host address'
 
-    "${OT_CTL[@]}" -I "${NETIF_NAME}" mdns disable | grep 'Done' || die 'failed to disable mDNS'
+    if [[ ${enabled_here} == 1 ]]; then
+        "${OT_CTL[@]}" -I "${NETIF_NAME}" mdns disable | grep 'Done' || die 'failed to disable mDNS'
+    fi
 }
 
 # The border routing manager, which hands the NAT64 translator its prefix, needs an infrastructure interface that is
