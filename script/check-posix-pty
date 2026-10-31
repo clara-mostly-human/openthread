@@ -93,14 +93,12 @@ do_build()
 {
     ./script/cmake-build simulation
     # OMR prefixes are installed as kernel routes (which needs border routing for otNetDataContainsOmrPrefix), so that
-    # the daemon's route handling is exercised.
+    # the daemon's route handling is exercised. The NAT64 translator (with the border routing manager that hands it
+    # its prefix) is on for check_daemon_nat64.
     # The mDNS CLI (`mdns enable`, `mdns localhostaddrs`) needs the public mDNS API, which has no cmake option.
     CFLAGS="-DOPENTHREAD_CONFIG_MULTICAST_DNS_PUBLIC_API_ENABLE=1 ${CFLAGS:-}" \
         CXXFLAGS="-DOPENTHREAD_CONFIG_MULTICAST_DNS_PUBLIC_API_ENABLE=1 ${CXXFLAGS:-}" \
-        ./script/cmake-build posix -DOT_PLATFORM_NETIF=1 -DOT_PLATFORM_UDP=1 -DOT_UDP_FORWARD=0 -DOT_POSIX_MAX_POWER_TABLE=1 -DOT_POSIX_INSTALL_OMR_ROUTES=ON -DOT_BORDER_ROUTING=ON -DOT_MDNS=ON -DOT_DAEMON="${OT_DAEMON}" -DOT_READLINE="${OT_READLINE}"
-    # the daemon's route handling is exercised. The NAT64 translator (with the border routing manager that hands it
-    # its prefix) is on for check_daemon_nat64.
-    ./script/cmake-build posix -DOT_PLATFORM_NETIF=1 -DOT_PLATFORM_UDP=1 -DOT_UDP_FORWARD=0 -DOT_POSIX_MAX_POWER_TABLE=1 -DOT_POSIX_INSTALL_OMR_ROUTES=ON -DOT_BORDER_ROUTING=ON -DOT_NAT64_TRANSLATOR=ON -DOT_NAT64_BORDER_ROUTING=ON -DOT_DAEMON="${OT_DAEMON}" -DOT_READLINE="${OT_READLINE}"
+        ./script/cmake-build posix -DOT_PLATFORM_NETIF=1 -DOT_PLATFORM_UDP=1 -DOT_UDP_FORWARD=0 -DOT_POSIX_MAX_POWER_TABLE=1 -DOT_POSIX_INSTALL_OMR_ROUTES=ON -DOT_BORDER_ROUTING=ON -DOT_MDNS=ON -DOT_NAT64_TRANSLATOR=ON -DOT_NAT64_BORDER_ROUTING=ON -DOT_DAEMON="${OT_DAEMON}" -DOT_READLINE="${OT_READLINE}"
 }
 
 # The netif joins ff02::1 on the Thread interface when it comes up and leaves it when it
@@ -264,13 +262,6 @@ check_daemon_address_events()
     local address='fd00:1234:5678::1'
     # ot-ctl prints every address as eight groups, without "::".
     local listed='fd00:1234:5678:0:0:0:0:1'
-
-check_daemon_mdns_address_monitor()
-{
-    local address='fd00:5678::1'
-    # ot-ctl prints every address as eight groups, without "::".
-    local listed='fd00:5678:0:0:0:0:0:1'
-    local index
     local addresses
 
     [[ ${OT_DAEMON} == 'on' ]] || return 0
@@ -361,6 +352,16 @@ check_host_link_state()
     sleep 1
     "${OT_CTL[@]}" -I "${NETIF_NAME}" ifconfig | grep 'up' || die 'OpenThread did not follow the host setting the interface up'
 }
+
+check_daemon_mdns_address_monitor()
+{
+    local address='fd00:5678::1'
+    # ot-ctl prints every address as eight groups, without "::".
+    local listed='fd00:5678:0:0:0:0:0:1'
+    local index
+    local addresses
+
+    [[ ${OT_DAEMON} == 'on' ]] || return 0
 
     # OpenThread's mDNS learns the addresses of the interface it serves from the routing socket
     # (netlink on Linux) and lists them as its local host addresses.
@@ -647,8 +648,8 @@ EOF
         check_daemon_omr_route
         check_daemon_nat64
         check_daemon_netif_down
-        check_daemon_backtrace
         check_host_link_state
+        check_daemon_backtrace
         return 0
     fi
 
@@ -681,8 +682,8 @@ EOF
     check_daemon_omr_route
     check_daemon_nat64
     check_daemon_netif_down
-    check_daemon_backtrace
     check_host_link_state
+    check_daemon_backtrace
 }
 
 main()
