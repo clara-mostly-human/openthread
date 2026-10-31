@@ -73,3 +73,31 @@ jobs:
       - name: full default build (expected to fail at the ot-cli link)
         run: |
           cd build && (ninja 2>&1 | tail -40); echo "ninja exit=${PIPESTATUS[0]}"
+
+  reference-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: generate the mbedtls config header (default simulation build)
+        run: |
+          set -x; set +e
+          sudo apt-get update -qq && sudo apt-get install -y -qq unifdef ninja-build > /dev/null
+          which unifdef unifdefall; unifdef -V 2>&1 | head -2; file "$(which unifdefall)"
+          mkdir -p /tmp/p && cd /tmp/p
+          printf '#define BAR 1\n' > bar.h
+          printf '#include "bar.h"\n#if FOO\nfoo\n#endif\n#if BAR\nbar\n#endif\n#if BAZ\nbaz\n#endif\n' > u.h
+          unifdefall -I. -DFOO=1 u.h; echo "unifdefall single exit=$?"
+          unifdefall -I. -DFOO=1 -DFOO=1 u.h; echo "unifdefall dup exit=$?"
+          cd "$GITHUB_WORKSPACE"
+          mkdir build && cd build
+          CFLAGS="$NEST_CFLAGS" CXXFLAGS="$NEST_CFLAGS" cmake -GNinja -DOT_PLATFORM=simulation ..
+          ninja -t commands third_party/mbedtls/openthread-mbedtls-config.h | tail -1 | tee /tmp/gen.cmd
+          ninja -v third_party/mbedtls/openthread-mbedtls-config.h; echo "ninja exit=$?"
+          H=third_party/mbedtls/openthread-mbedtls-config.h
+          wc -l $H; grep -c '^#if' $H || true
+          grep -n 'OPENTHREAD_CONFIG\|X509_CRT_PARSE_C\|SSL_TLS_C' $H || true
+          echo "--- header as generated"; cat $H
