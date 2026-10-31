@@ -31,7 +31,7 @@ jobs:
 
       - name: toolchain
         run: |
-          set -x
+          set -x; set +e
           sw_vers; xcodebuild -version; uname -m; cmake --version | head -1; ninja --version
           which unifdef unifdefall cpp
           unifdef -V 2>&1 || true
@@ -45,7 +45,7 @@ jobs:
 
       - name: generate the mbedtls config header (default simulation build)
         run: |
-          set -x
+          set -x; set +e
           mkdir build && cd build
           CFLAGS="$NEST_CFLAGS" CXXFLAGS="$NEST_CFLAGS" cmake -GNinja -DOT_PLATFORM=simulation ..
           ninja -t commands third_party/mbedtls/openthread-mbedtls-config.h | tail -1 | tee /tmp/gen.cmd
@@ -59,7 +59,7 @@ jobs:
 
       - name: regenerate with deduplicated defines
         run: |
-          set -x
+          set -x; set +e
           cd build/third_party/mbedtls
           DEFS=$(tr ' ' '\n' < /tmp/gen.cmd | sed "s/^'//; s/'\$//" | grep '^-D' | sort -u | tr '\n' ' ')
           INCS=$(tr ' ' '\n' < /tmp/gen.cmd | grep '^-I' | sort -u | tr '\n' ' ')
